@@ -12,6 +12,8 @@ import Foundation
  */
 internal enum UpdatesStateValue: String, CaseIterable {
   case idle
+  case startupChecking
+  case startupDownloading
   case checking
   case downloading
   case restarting
@@ -22,6 +24,13 @@ internal enum UpdatesStateValue: String, CaseIterable {
  will cause the machine to transition to a new state.
  */
 public enum UpdatesStateEventType: String {
+  case startupCheck
+  case startupCheckCompleteUnavailable
+  case startupCheckCompleteAvailable
+  case startupCheckError
+  case startupDownload
+  case startupDownloadComplete
+  case startupDownloadError
   case check
   case checkCompleteUnavailable
   case checkCompleteAvailable
@@ -44,6 +53,22 @@ internal protocol UpdatesStateEvent {
   var message: String? { get }
   var rollbackCommitTime: Date? { get }
   var error: [String: String]? { get }
+}
+
+internal struct UpdatesStateEventStartupCheck: UpdatesStateEvent {
+  let type: UpdatesStateEventType = .startupCheck
+  let manifest: [String: Any]? = nil
+  let message: String? = nil
+  let rollbackCommitTime: Date? = nil
+  let error: [String: String]? = nil
+}
+
+internal struct UpdatesStateEventStartupCheckComplete: UpdatesStateEvent {
+  let type: UpdatesStateEventType = .startupCheckComplete
+  let manifest: [String: Any]? = nil
+  let message: String? = nil
+  let rollbackCommitTime: Date? = nil
+  let error: [String: String]? = nil
 }
 
 internal struct UpdatesStateEventCheck: UpdatesStateEvent {
@@ -162,6 +187,7 @@ public struct UpdatesStateContextRollback {
  The state machine context, with information that will be readable from JS.
  */
 public struct UpdatesStateContext {
+  public let isStartupProcedureRunning: Bool
   public let isUpdateAvailable: Bool
   public let isUpdatePending: Bool
   public let isRollback: Bool
@@ -185,6 +211,7 @@ public struct UpdatesStateContext {
 
   var json: [String: Any?] {
     return [
+      "isStartupProcedureRunning": self.isStartupProcedureRunning,
       "isUpdateAvailable": self.isUpdateAvailable,
       "isUpdatePending": self.isUpdatePending,
       "isRollback": self.isRollback,
@@ -204,6 +231,7 @@ public struct UpdatesStateContext {
 
 public extension UpdatesStateContext {
   init() {
+    self.isStartupProcedureRunning = false
     self.isUpdateAvailable = false
     self.isUpdatePending = false
     self.isRollback = false
@@ -233,6 +261,7 @@ public extension UpdatesStateContext {
   }
 
   struct Builder {
+    var isStartupProcedureRunning: Bool = false
     var isUpdateAvailable: Bool = false
     var isUpdatePending: Bool = false
     var isRollback: Bool = false
@@ -247,6 +276,7 @@ public extension UpdatesStateContext {
     var rollback: UpdatesStateContextRollback?
 
     fileprivate init(original: UpdatesStateContext) {
+      self.isStartupProcedureRunning = original.isStartupProcedureRunning
       self.isUpdateAvailable = original.isUpdateAvailable
       self.isUpdatePending = original.isUpdatePending
       self.isRollback = original.isRollback
@@ -263,6 +293,7 @@ public extension UpdatesStateContext {
 
     fileprivate func toContext(newSequenceNumber: Int) -> UpdatesStateContext {
       return UpdatesStateContext(
+        isStartupProcedureRunning: isStartupProcedureRunning,
         isUpdateAvailable: isUpdateAvailable,
         isUpdatePending: isUpdatePending,
         isRollback: isRollback,
@@ -400,6 +431,14 @@ internal class UpdatesStateMachine {
     }
 
     switch event.type {
+    case .startup:
+      return context.copyAndIncrementSequenceNumber {
+        $0.isStartupProcedureRunning = true
+      }
+    case .startupComplete:
+      return context.copyAndIncrementSequenceNumber {
+        $0.isStartupProcedureRunning = false
+      }
     case .check:
       return context.copyAndIncrementSequenceNumber {
         $0.isChecking = true
@@ -470,7 +509,8 @@ internal class UpdatesStateMachine {
    and the app will crash.
    */
   private static let updatesStateAllowedEvents: [UpdatesStateValue: Set<UpdatesStateEventType>] = [
-    .idle: [.check, .download, .restart],
+    .idle: [.startup, .check, .download, .restart],
+    .starting: [.startupComplete],
     .checking: [.checkCompleteAvailable, .checkCompleteUnavailable, .checkError],
     .downloading: [.downloadComplete, .downloadError],
     .restarting: []
@@ -481,6 +521,8 @@ internal class UpdatesStateMachine {
    machine will transition to.
    */
   private static let updatesStateTransitions: [UpdatesStateEventType: UpdatesStateValue] = [
+    .startup: .starting,
+    .startupComplete: .idle,
     .check: .checking,
     .checkCompleteAvailable: .idle,
     .checkCompleteUnavailable: .idle,
